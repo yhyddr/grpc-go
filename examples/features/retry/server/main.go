@@ -26,44 +26,56 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
-	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	pb "google.golang.org/grpc/examples/helloworld/helloworld"
+	pb "google.golang.org/grpc/examples/features/proto/echo"
 	"google.golang.org/grpc/status"
 )
 
 var port = flag.Int("port", 50052, "port number")
 
-// server is used to implement helloworld.GreeterServer.
-type server struct {
-	mu    sync.Mutex
-	count map[string]int
+type failingServer struct {
+	mu sync.Mutex
+
+	reqCounter uint
+	reqModulo  uint
+	reqSleep   time.Duration
+	reqError   codes.Code
 }
 
-// SayHello implements helloworld.GreeterServer
-func (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
+func (s *failingServer) maybeFailRequest() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Track the number of times the user has been greeted.
-	s.count[in.Name]++
-	if s.count[in.Name] > 1 {
-		st := status.New(codes.ResourceExhausted, "Request limit exceeded.")
-		ds, err := st.WithDetails(
-			&epb.QuotaFailure{
-				Violations: []*epb.QuotaFailure_Violation{{
-					Subject:     fmt.Sprintf("name:%s", in.Name),
-					Description: "Limit one greeting per person",
-				}},
-			},
-		)
-		if err != nil {
-			return nil, st.Err()
-		}
-		return nil, ds.Err()
+	s.reqCounter++
+	if (s.reqModulo > 0) && (s.reqCounter%s.reqModulo == 0) {
+		return nil
 	}
-	return &pb.HelloReply{Message: "Hello " + in.Name}, nil
+	time.Sleep(s.reqSleep)
+	return status.Errorf(s.reqError, "maybeFailRequest: failing it")
+}
+
+func (s *failingServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
+	if err := s.maybeFailRequest(); err != nil {
+		log.Println("request failed count:", s.reqCounter)
+		return nil, err
+	}
+
+	log.Println("request succeeded count:", s.reqCounter)
+	return &pb.EchoResponse{Message: req.Message}, nil
+}
+
+func (s *failingServer) ServerStreamingEcho(req *pb.EchoRequest, stream pb.Echo_ServerStreamingEchoServer) error {
+	return status.Error(codes.Unimplemented, "RPC unimplemented")
+}
+
+func (s *failingServer) ClientStreamingEcho(stream pb.Echo_ClientStreamingEchoServer) error {
+	return status.Error(codes.Unimplemented, "RPC unimplemented")
+}
+
+func (s *failingServer) BidirectionalStreamingEcho(stream pb.Echo_BidirectionalStreamingEchoServer) error {
+	return status.Error(codes.Unimplemented, "RPC unimplemented")
 }
 
 func main() {
@@ -74,9 +86,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+	fmt.Println("listen on address", address)
 
 	s := grpc.NewServer()
-	pb.RegisterGreeterServer(s, &server{count: make(map[string]int)})
+
+	// a retry configuration
+	failingservice := &failingServer{
+		reqCounter: 0,
+		reqModulo:  4,
+		reqError:   codes.Unavailable, /* uint = 14 */
+		reqSleep:   0,
+	}
+
+	pb.RegisterEchoServer(s, failingservice)
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}

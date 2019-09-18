@@ -23,74 +23,44 @@ import (
 	"context"
 	"flag"
 	"log"
-	"os"
 	"time"
 
-	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
-	pb "google.golang.org/grpc/examples/helloworld/helloworld"
-	"google.golang.org/grpc/status"
+	pb "google.golang.org/grpc/examples/features/proto/echo"
 )
 
 var (
-	addr        = flag.String("addr", "localhost:50052", "the address to connect to")
+	addr = flag.String("addr", "localhost:50052", "the address to connect to")
+	// see https://github.com/grpc/grpc/blob/master/doc/service_config.md to know more about service config
 	retryPolicy = `{
-		"methodConfig": [
-		  {
-			"name": [
-			  {
-				"service": "",
-				"method": ""
-			  }
-			]
+		"methodConfig": [{
+		  "name": [{"service": "grpc.examples.echo.Echo"}],
+		  "waitForReady": true,
+		  "retryPolicy": {
+			  "MaxAttempts": 4,
+			  "InitialBackoff": ".01s",
+			  "MaxBackoff": ".01s",
+			  "BackoffMultiplier": 1.0,
+			  "RetryableStatusCodes": [ "UNAVAILABLE" ]
 		  }
-		],
-		"retryPolicy": {
-		  "maxAttempts": 4,
-		  "initialBackoff": "0.1s",
-		  "maxBackoff": "1s",
-		  "backoffMultiplier": 2,
-		  "retryableStatusCodes": [
-			"UNAVAILABLE"
-		  ]
-		},
-		"retryThrottling": {
-		  "maxTokens": 10,
-		  "tokenRatio": 0.1
-		}
-	}`
-	hedgingPolicy = `{
-		"methodConfig": [
-		  {
-			"name": [
-			  {
-				"service": "",
-				"method": ""
-			  }
-			]
-		  }
-		],
-		"hedgingPolicy": {
-		  "maxAttempts": 4,
-		  "hedgingDelay": "0.5s",
-		  "nonFatalStatusCodes": [
-			"UNAVAILABLE",
-			"INTERNAL",
-			"ABORTED"
-		  ]
-		},
-		"retryThrottling": {
-		  "maxTokens": 10,
-		  "tokenRatio": 0.1
-		}
-	  }`
+		}]}`
 )
+
+// use grpc.WithDefaultServiceConfig() to set service config
+func retryDial() (*grpc.ClientConn, error) {
+	return grpc.Dial(*addr, grpc.WithInsecure(), grpc.WithDefaultServiceConfig(retryPolicy))
+}
+
+func newCtx(timeout time.Duration) context.Context {
+	ctx, _ := context.WithTimeout(context.TODO(), timeout)
+	return ctx
+}
 
 func main() {
 	flag.Parse()
 
 	// Set up a connection to the server.
-	conn, err := grpc.Dial(*addr, grpc.WithInsecure(), grpc.WithDefaultServiceConfig(retryPolicy))
+	conn, err := retryDial()
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
@@ -99,22 +69,11 @@ func main() {
 			log.Printf("failed to close connection: %s", e)
 		}
 	}()
-	c := pb.NewGreeterClient(conn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	r, err := c.SayHello(ctx, &pb.HelloRequest{Name: "world"})
+	c := pb.NewEchoClient(conn)
+	reply, err := c.UnaryEcho(newCtx(1*time.Second), &pb.EchoRequest{Message: "Try and Success"})
 	if err != nil {
-		s := status.Convert(err)
-		for _, d := range s.Details() {
-			switch info := d.(type) {
-			case *epb.QuotaFailure:
-				log.Printf("Quota failure: %s", info)
-			default:
-				log.Printf("Unexpected type: %s", info)
-			}
-		}
-		os.Exit(1)
+		log.Println(err)
 	}
-	log.Printf("Greeting: %s", r.Message)
+	log.Println(reply)
 }
